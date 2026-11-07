@@ -1,14 +1,14 @@
 # Task 4: Deployment topologies and trade-offs
 
-**Name / ชื่อ:**
+**Name / ชื่อ:** ติณณภพ ดวงทา
 
-**Student ID / รหัสนิสิต:**
+**Student ID / รหัสนิสิต:** 6870107021
 
 This is **individual work**: each student completes and submits their own copy, in their own fork.
 
 *งานนี้เป็น**งานเดี่ยว** นิสิตแต่ละคนทำและส่งงานของตัวเอง ใน fork ของตัวเอง*
 
-**Scenario (A, B or C) / Scenario ที่เลือก:**
+**Scenario (A, B or C) / Scenario ที่เลือก:** B. Canteen kiosk
 
 Choose **one** scenario below. If the last digit of your student ID is odd, take A or B; if it is even, take B or C. Use your measurements from Tutorial 6 as evidence: cite run names from `results/runs.csv`. Answer in Thai or English.
 
@@ -58,9 +58,9 @@ The three most important quality requirements for your scenario, each with a num
 
 | # | Quality | Requirement |
 |---|---|---|
-| 1 | | |
-| 2 | | |
-| 3 | | |
+| 1 | Availability | tablet รับรีวิวได้ทุกรายการแม้ offline นานถึง 30 นาที และไม่มีรีวิวหาย |
+| 2 | Timeliness | ทุกรีวิวได้ label ภายในสิ้นวัน |
+| 3 | Accuracy / Cost | accuracy อย่างน้อย 90% และใช้ large model ไม่เกิน 40% ของรีวิว |
 
 ## 2. Design / การออกแบบ
 
@@ -68,16 +68,43 @@ Your topology, the patterns you add, and a container-level diagram (C4 level 2).
 
 *topology ที่เลือก pattern ที่เพิ่ม และ diagram ระดับ container (C4 level 2) เขียนด้วย Mermaid*
 
+ใช้ **T4 (Asynchronous / batch)** tablet เก็บรีวิวไว้ในเครื่องก่อน แล้วส่งขึ้น server เมื่อกลับมา online จากนั้น scoring worker ติด label ให้เป็นชุดๆ
+
+- **Cascade 0.7:** ได้ accuracy ใกล้ large model แต่จ่ายเฉพาะรีวิวที่ยาก
+- **Cache:** รีวิวที่ kiosk มักสั้นและซ้ำกัน
+- **Fallback:** ถ้าติด label ไม่สำเร็จ ให้เป็น pending ไว้แล้วลองใหม่รอบถัดไป
+
 ```mermaid
 C4Container
-    title Your design: container diagram
-    %% Replace the example below with your own people, containers and relationships.
-    %% See the CampusEats C4 diagram in README.md for the full syntax.
-    Person(customer, "Customer", "Writes restaurant reviews")
+    title Canteen kiosk: container diagram
+    Person(student, "Student", "Leaves a review on the canteen tablet")
+    Person(owner, "Restaurant owner", "Reads label counts by the end of the day")
     System_Boundary(campuseats, "CampusEats") {
-        Container(review, "Review service", "Python, FastAPI", "What it does")
+        Container(kiosk, "Kiosk app", "Tablet, SQLite outbox", "Saves reviews offline with a UUID")
+        Container(gateway, "API gateway", "Python, FastAPI", "Entry point for kiosks and owners")
+        Container(review, "Review service", "Python, FastAPI", "Stores reviews as pending")
+        ContainerDb(reviewdb, "Review database", "PostgreSQL", "Reviews, labels, status")
+        Container(inference, "Inference service", "Python, FastAPI", "Small and large model")
+        Container(worker, "Scoring worker", "Python", "Cascade 0.7 + cache, max 4 large calls")
+        ContainerQueue(broker, "Message broker", "RabbitMQ", "review-created events")
     }
-    Rel(customer, review, "Posts reviews", "HTTP/JSON")
+    Rel(student, kiosk, "Writes review", "Touch screen")
+    Rel(owner, gateway, "Views label counts", "HTTPS/JSON")
+    Rel(kiosk, gateway, "Syncs when online", "HTTPS/JSON")
+    Rel(gateway, review, "Forwards", "HTTP/JSON")
+    Rel(review, reviewdb, "Saves as pending", "SQL")
+    Rel(review, broker, "Publishes", "AMQP")
+    Rel(worker, broker, "Consumes", "AMQP")
+    Rel(worker, inference, "POST /predict", "REST")
+    Rel(worker, reviewdb, "Writes labels", "SQL")
+    UpdateRelStyle(kiosk, gateway, $offsetY="-25")
+    UpdateRelStyle(gateway, review, $offsetY="-25")
+    UpdateRelStyle(review, reviewdb, $offsetY="-25")
+    UpdateRelStyle(worker, broker, $offsetY="-25")
+    UpdateRelStyle(worker, inference, $offsetY="-25")
+    UpdateRelStyle(review, broker, $offsetX="-45")
+    UpdateRelStyle(worker, reviewdb, $offsetX="90", $offsetY="10")
+    UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
 
 ## 3. Evidence / หลักฐาน
@@ -88,8 +115,12 @@ Which runs support your choice? Show the numbers and, for scenario A, the capaci
 
 | Run | What it shows / แสดงอะไร |
 |---|---|
-| | |
-| | |
+| `t0-small` | small model อย่างเดียวแม่นแค่ 72.5% ไม่ถึง 90% |
+| `t1-after` | รับรีวิวไว้ก่อนแล้วค่อยติด label ทีหลัง ทำให้ errors เป็น 0 |
+| `t2-0.7` | cascade ได้ accuracy 93.0% โดยใช้ large model 53% |
+| `t3-cache` | เพิ่ม cache แล้วใช้ large model เหลือ 38% โดย accuracy เท่าเดิม |
+
+ถ้ามีรีวิววันละ 5,000 รายการ (เหตุการณ์สมมติ) จะใช้ large model ประมาณ 1,900 calls ที่ 20 calls ต่อวินาทีใช้เวลาไม่ถึง 2 นาที จึงทันสิ้นวันแน่นอน
 
 ## 4. ADR
 
@@ -97,20 +128,21 @@ Use the ADR format from W5.
 
 *ใช้รูปแบบ ADR จาก W5*
 
-**Title:**
+**Title:** ใช้ batch scoring สำหรับรีวิวจาก kiosk
 
 **Status:** Proposed
 
-**Context:**
+**Context:** Wi-Fi ในโรงอาหารหลุดบ่อย แต่ต้องรับรีวิวได้ทุกรายการ และเจ้าของร้านต้องการ label แค่ภายในสิ้นวัน ส่วน small model อย่างเดียวแม่นไม่พอ (72.5%)
 
-**Decision:**
+**Decision:** tablet เก็บรีวิวไว้ในเครื่องแล้วส่งเมื่อ online review service บันทึกเป็น pending แล้วให้ worker ติด label เป็นชุดด้วย cascade 0.7 และ cache
 
 **Consequences:**
-- Positive:
-- Negative:
+- Positive: รีวิวไม่หายแม้ offline ได้ accuracy 93% และใช้ large model แค่ 38% (`t3-cache`)
+- Negative: label ไม่ real-time และมี component เพิ่ม (broker, worker, database) ถ้า tablet เสียก่อน sync รีวิวที่ค้างอยู่จะหาย
 
 **Alternatives considered:** at least one topology you rejected, and why.
 
 *อย่างน้อยหนึ่ง topology ที่ไม่เลือก และเหตุผล*
 
->
+> - **T1:** tablet ต้อง online ตอนส่ง จึงรับรีวิวตอน offline ไม่ได้
+> - **T2:** small model บน tablet ทำงาน offline ได้ แต่แม่นแค่ 72.5%
